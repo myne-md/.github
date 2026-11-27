@@ -58,6 +58,46 @@ async function fetchComments() {
 
 let priorSignature = '';
 let signatureHistory = [];
+let priorReviewedSha = '';
+let priorVerdict = '';
+let priorFindings = [];
+
+/// The rendered findings block, split back into the findings it lists.
+///
+/// The re-review prompt has to check what the last review asked for, and a hash
+/// cannot answer that: a model handed only a signature re-reviews from scratch
+/// and finds a fresh set every round. apply-verdict.mjs writes one bullet per
+/// finding in a fixed shape; this reads it back.
+function parseFindings(body) {
+  const section = body.match(
+    /<summary><b>Findings by dimension[^<]*<\/b><\/summary>([\s\S]*?)<\/details>/,
+  );
+  if (!section) return [];
+  const out = [];
+  let cur = null;
+  for (const line of section[1].split('\n')) {
+    const head = line.match(/^- \*\*(Critical|Important|Minor)\*\* `([^`]+)`/);
+    if (head) {
+      if (cur) out.push(cur);
+      const where = head[2];
+      // `file:line` when the finding is anchored, a bare path when it is not.
+      const tail = where.match(/^(.*):(\d+)$/);
+      cur = {
+        severity: head[1],
+        file: tail ? tail[1] : where,
+        line: tail ? Number(tail[2]) : null,
+        text: [],
+      };
+      continue;
+    }
+    if (!cur) continue;
+    const text = line.trim();
+    if (text) cur.text.push(text);
+  }
+  if (cur) out.push(cur);
+  return out.map((f) => ({ ...f, text: f.text.join('\n') }));
+}
+
 try {
   const comments = await fetchComments();
   // Comments come back oldest first, so the last match is the most recent review.
@@ -67,6 +107,13 @@ try {
     if (b.indexOf('<!-- myne-review -->') === -1) continue;
     const m = b.match(/Blocking-signature:\s*`([^`]*)`/);
     if (m) priorSignature = m[1];
+    const v = b.match(/\*\*Verdict:\s*([A-Z_]+)\*\*/);
+    if (v) priorVerdict = v[1];
+    // The footer names the commit this review saw: the re-review's delta starts
+    // there, so findings in already-reviewed code cannot arrive as new ones.
+    const r = b.match(/Reviewed\s*`([0-9a-f]{7,40})`/);
+    if (r) priorReviewedSha = r[1];
+    priorFindings = parseFindings(b);
     const hs = b.match(/<summary><b>Signature history<\/b><\/summary>([\s\S]*?)<\/details>/);
     if (hs) {
       const found = [];
@@ -107,8 +154,16 @@ const packet = {
     draft: !!pr.draft,
   },
   ...(agentsMd ? { project: { agents_md: agentsMd } } : {}),
-  ...(priorSignature || signatureHistory.length
-    ? { prior: { blocking_signature: priorSignature, signature_history: signatureHistory } }
+  ...(priorSignature || signatureHistory.length || priorFindings.length
+    ? {
+        prior: {
+          blocking_signature: priorSignature,
+          signature_history: signatureHistory,
+          reviewed_sha: priorReviewedSha,
+          verdict: priorVerdict,
+          findings: priorFindings,
+        },
+      }
     : {}),
   paths,
 };
@@ -119,5 +174,6 @@ mkdirSync(dirname(OUT), { recursive: true });
 writeFileSync(OUT, JSON.stringify({ packet, meta }));
 console.log(
   `build-context: packet written to ${OUT} (repo=${repoName}#${prNumber}, ` +
-    `prior=${priorSignature ? 'yes' : 'no'}, agents=${agentsMd ? 'yes' : 'no'})`,
+    `prior=${priorSignature ? 'yes' : 'no'}, prior_findings=${priorFindings.length}, ` +
+    `agents=${agentsMd ? 'yes' : 'no'})`,
 );
