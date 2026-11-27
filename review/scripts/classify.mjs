@@ -53,7 +53,7 @@ const permissions = [
       { action: 'read', resource: root + '/*', effect: 'allow' },
     ];
   }),
-  ...['git diff *', 'git log *', 'git show *', 'git ls-files *', 'git status *', 'git rev-parse *'].map(
+  ...['git diff *', 'git log *', 'git show *', 'git ls-files *', 'git status *', 'git rev-parse *', 'git merge-base *'].map(
     (resource) => ({ action: 'shell', resource, effect: 'allow' }),
   ),
 ];

@@ -123,6 +123,20 @@ if (findings.length) {
     if (f.what) L.push('  ' + esc(f.what));
     if (f.why) L.push('  Why: ' + esc(f.why));
     if (f.fix) L.push('  Fix: ' + esc(f.fix));
+    if (f.evidence) L.push('  Evidence: ' + esc(f.evidence));
+  }
+  L.push('');
+  L.push('</details>');
+}
+const unverified = Array.isArray(v.unverified) ? v.unverified : [];
+if (unverified.length) {
+  L.push('');
+  L.push('<details><summary><b>Unverified (' + unverified.length + ')</b></summary>');
+  L.push('');
+  for (const u of unverified) {
+    const where = u.file ? '`' + esc(u.file) + (u.line ? ':' + u.line : '') + '`' : '';
+    L.push('- **D' + (u.dimension || 0) + '** ' + where + ' — ' + esc(u.what || ''));
+    if (u.why_not_verified) L.push('  Not verified: ' + esc(u.why_not_verified));
   }
   L.push('');
   L.push('</details>');
