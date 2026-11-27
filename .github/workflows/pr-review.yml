@@ -1,0 +1,107 @@
+name: pr-review
+
+# Reusable Myne PR reviewer. Callers live in each public repository as a tiny
+# workflow that only does `uses: myne-md/.github/.github/workflows/pr-review.yml@main`.
+#
+# On every PR open/push/reopen/draft-ready: build the review context from the
+# event, run the review prompt headless via `opencode run` with a read-only
+# permission set, then render and post the verdict (summary comment + inline
+# Critical anchors) as myne-bot.
+#
+# The reviewer is a pure function over the tree: it reads, never writes. The
+# deterministic halves live in review/scripts/. opencode is the reviewer in the
+# middle, and its permissions are the opencode equivalent of the old jailed
+# runner's `--allowed-tools Read Grep Glob Agent Task "Bash(git …:*)"`.
+#
+# Forks are not reviewed: a fork's code must never run with this workflow's
+# secrets, and pull_request_target is deliberately not used because it would
+# checkout fork code with secrets present.
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        description: "opencode model in provider/model form"
+        type: string
+        required: false
+        default: opencode-go/deepseek-v4.1-flash
+    secrets:
+      OPENCODE_API_KEY:
+        required: true
+      MYNE_BOT_PAT:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    if: github.event.pull_request.head.repo.fork == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The kit is cloned outside the working tree so the "assert tree clean"
+      # gate measures the reviewer's behaviour, not this workflow's own files.
+      - name: Checkout review kit
+        run: git clone --depth 1 https://github.com/myne-md/.github.git "$RUNNER_TEMP/review-kit"
+
+      # Companion repos do not carry the specs. When the PR is NOT in myne,
+      # clone the main repo read-only so the spec dimensions have something to
+      # read. Public repo, so no token is needed.
+      - name: Clone myne specs (companion PRs)
+        if: github.event.repository.name != 'myne'
+        run: git clone --depth 1 https://github.com/myne-md/myne.git "$RUNNER_TEMP/spec-repo"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install opencode
+        run: npm install --global @opencode/cli
+
+      - name: Build context
+        env:
+          REVIEW_TOKEN: ${{ secrets.MYNE_BOT_PAT }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+          SPEC_REPO_DIR: ${{ github.event.repository.name != 'myne' && format('{0}/spec-repo', runner.temp) || '' }}
+          REVIEW_OUT_DIR: ${{ runner.temp }}/review
+        run: node "$RUNNER_TEMP/review-kit/review/scripts/build-context.mjs"
+
+      - name: Review (opencode run, read-only)
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          REVIEW_MODEL: ${{ inputs.model }}
+          # A full review took 26m on myne#1118. The 30m default is too close to
+          # that, so give the model room to finish; the cap is a safety net.
+          REVIEW_TIMEOUT_MS: 3600000
+          REVIEW_PACKET: ${{ runner.temp }}/review/packet.json
+          REVIEW_PROMPT: ${{ runner.temp }}/review-kit/review/prompt.md
+          REVIEW_OUT: ${{ runner.temp }}/review/verdict.json
+          REVIEW_DIR: ${{ github.workspace }}
+          SPEC_REPO_DIR: ${{ github.event.repository.name != 'myne' && format('{0}/spec-repo', runner.temp) || '' }}
+        run: node "$RUNNER_TEMP/review-kit/review/scripts/classify.mjs"
+
+      # The reviewer must never modify the tree. Assert it after the run,
+      # exactly as review.sh did before unwrapping the verdict.
+      - name: Assert tree clean
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "FATAL: the reviewer modified the working tree, which it must never do:"
+            git status --porcelain
+            exit 1
+          fi
+
+      - name: Apply verdict
+        env:
+          MYNE_BOT_PAT: ${{ secrets.MYNE_BOT_PAT }}
+          REVIEW_PACKET: ${{ runner.temp }}/review/packet.json
+          REVIEW_VERDICT: ${{ runner.temp }}/review/verdict.json
+        run: node "$RUNNER_TEMP/review-kit/review/scripts/apply-verdict.mjs"
