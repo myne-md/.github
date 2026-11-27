@@ -36,7 +36,9 @@ permissions:
 
 jobs:
   review:
-    if: github.event.pull_request.head.repo.fork == false
+    # `skip-review` is the maintainer's stop: a PR carrying it gets no review
+    # run, and a push to it does not restart one. Fork PRs are skipped anyway.
+    if: ${{ github.event.pull_request.head.repo.fork == false && !contains(github.event.pull_request.labels.*.name, 'skip-review') }}
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
