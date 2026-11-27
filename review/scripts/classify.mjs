@@ -31,34 +31,32 @@ const OUT = process.env.REVIEW_OUT || join(dirname(PACKET), 'verdict.json');
 const DIR = process.env.REVIEW_DIR || process.env.GITHUB_WORKSPACE || process.cwd();
 const TIMEOUT_MS = Number(process.env.REVIEW_TIMEOUT_MS || 1800000);
 
-// The reviewer may only read. `task` is the subagent tool. bash is restricted
-// to read-only git plumbing; a subagent inherits the parent's permission gates,
-// so it can do no more than the parent. The spec checkout lives under
-// runner.temp, OUTSIDE the working tree, so the external_directory guard is
-// opened for exactly that root — not globally. read/grep/glob remain the only
-// tools that can reach anything, and edit/write/webfetch/websearch stay denied.
+// The reviewer may only read. V2 permissions are an ordered rule list; the last
+// matching rule wins, so the blanket deny comes first and the read-only
+// exceptions follow. `subagent` is the subagent tool's permission action. The
+// spec checkout lives under runner.temp, OUTSIDE the working tree, so
+// external_directory is opened for exactly that root — not globally. edit,
+// webfetch and websearch stay denied, so an open external path still cannot
+// exfiltrate or mutate anything.
 const externalRoots = [process.env.SPEC_REPO_DIR].filter(Boolean);
-const externalDirectory = externalRoots.length
-  ? Object.fromEntries(externalRoots.map((r) => [r.replace(/\/$/, '') + '/**', 'allow']))
-  : {};
 
-const PERMISSION = {
-  '*': 'deny',
-  read: 'allow',
-  grep: 'allow',
-  glob: 'allow',
-  task: 'allow',
-  ...(externalRoots.length ? { external_directory: externalDirectory } : {}),
-  bash: {
-    'git diff *': 'allow',
-    'git log *': 'allow',
-    'git show *': 'allow',
-    'git ls-files *': 'allow',
-    'git status *': 'allow',
-    'git rev-parse *': 'allow',
-    '*': 'deny',
-  },
-};
+const permissions = [
+  { action: '*', resource: '*', effect: 'deny' },
+  { action: 'read', resource: '*', effect: 'allow' },
+  { action: 'grep', resource: '*', effect: 'allow' },
+  { action: 'glob', resource: '*', effect: 'allow' },
+  { action: 'subagent', resource: '*', effect: 'allow' },
+  ...externalRoots.flatMap((r) => {
+    const root = r.replace(/\/$/, '');
+    return [
+      { action: 'external_directory', resource: root + '/*', effect: 'allow' },
+      { action: 'read', resource: root + '/*', effect: 'allow' },
+    ];
+  }),
+  ...['git diff *', 'git log *', 'git show *', 'git ls-files *', 'git status *', 'git rev-parse *'].map(
+    (resource) => ({ action: 'shell', resource, effect: 'allow' }),
+  ),
+];
 
 const { packet } = JSON.parse(readFileSync(PACKET, 'utf8'));
 const body = readFileSync(PROMPT, 'utf8');
@@ -77,10 +75,13 @@ function runOpencode() {
   return new Promise((resolve, reject) => {
     const child = spawn(
       'opencode',
-      ['run', '--print-logs', '--format', 'json', '--model', MODEL, '--dir', DIR, prompt],
+      ['run', '--standalone', '--log-level', 'error', '--format', 'json', '--model', MODEL, prompt],
       {
+        cwd: DIR,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, OPENCODE_PERMISSION: JSON.stringify(PERMISSION) },
+        // PWD must follow cwd: the standalone server resolves its project
+        // location from PWD, and a stale PWD makes it review the wrong tree.
+        env: { ...process.env, PWD: DIR, OPENCODE_CONFIG_CONTENT: JSON.stringify({ permissions }) },
       },
     );
 
