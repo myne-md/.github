@@ -82,6 +82,11 @@ const DIM = {
 };
 const ORDER = { Critical: 0, Important: 1, Minor: 2 };
 const esc = (s) => String(s == null ? '' : s);
+// A follow-up is a verified defect this PR did not introduce. It is shown so the
+// person can file it, but it is not part of the verdict and not part of the
+// signature, which is what lets a re-review converge instead of finding a fresh
+// blocker every round.
+const isFollowUp = (f) => f && f.blocking === false;
 const sig = esc(v.blocking_signature || 'none');
 const L = [];
 L.push('<!-- myne-review -->');
@@ -103,7 +108,10 @@ if (v.fix_first) {
 const findings = Array.isArray(v.findings) ? v.findings.slice() : [];
 if (findings.length) {
   findings.sort(
-    (a, b) => (ORDER[a.severity] ?? 3) - (ORDER[b.severity] ?? 3) || (a.dimension || 0) - (b.dimension || 0),
+    (a, b) =>
+      (isFollowUp(a) ? 1 : 0) - (isFollowUp(b) ? 1 : 0) ||
+      (ORDER[a.severity] ?? 3) - (ORDER[b.severity] ?? 3) ||
+      (a.dimension || 0) - (b.dimension || 0),
   );
   L.push('');
   L.push('<details><summary><b>Findings by dimension (' + findings.length + ')</b></summary>');
@@ -117,9 +125,13 @@ if (findings.length) {
       L.push('#### D' + d + ': ' + (DIM[d] || 'Other'));
     }
     const where = f.file ? '`' + esc(f.file) + (f.line ? ':' + f.line : '') + '`' : '';
-    const spec = f.confidence === 'speculative' ? ' _(speculative)_' : '';
+    const tag = isFollowUp(f)
+      ? ' _(follow-up)_'
+      : f.confidence === 'speculative'
+        ? ' _(speculative)_'
+        : '';
     L.push('');
-    L.push('- **' + esc(f.severity || 'Minor') + '** ' + where + spec);
+    L.push('- **' + esc(f.severity || 'Minor') + '** ' + where + tag);
     if (f.what) L.push('  ' + esc(f.what));
     if (f.why) L.push('  Why: ' + esc(f.why));
     if (f.fix) L.push('  Fix: ' + esc(f.fix));
@@ -206,6 +218,7 @@ async function planInlineComments() {
   const comments = [];
   for (const f of v.findings || []) {
     if (f.severity !== 'Critical') continue;
+    if (isFollowUp(f)) continue;
     if (f.confidence === 'speculative') continue;
     if (!f.file || !f.line) continue;
     const set = valid.get(f.file);
